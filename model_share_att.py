@@ -58,24 +58,9 @@ class Expert_graph(nn.Module):
 
 
     def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
-        '''
-        Forward takes:
-            sentence: sentence_id of size (batch_size, text_length)
-            aspect: aspect_id of size (batch_size, aspect_length)
-            pos_class: pos_tag_id of size (batch_size, text_length)
-            dep_tags: dep_tag_id of size (batch_size, text_length)
-            text_len: (batch_size,) length of each sentence
-            aspect_len: (batch_size, ) aspect length of each sentence
-            dep_rels: (batch_size, text_length) relation
-            dep_heads: (batch_size, text_length) which node adjacent to that node
-            aspect_position: (batch_size, text_length) mask, with the position of aspect as 1 and others as 0
-            dep_dirs: (batch_size, text_length) the directions each node to the aspect
-        '''
-        #fmask = (torch.zeros_like(sentence) != sentence).float()  # (N，L)
-        #print('dep_heads=',dep_heads)
+
+
         fmask, rel_adj = inputs_to_deprel_adj(dep_heads, dep_rels, text_len, )
-        #print('fmask_shape=',fmask.shape)
-        #print('fmask=',fmask)
         device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         fmask=fmask.float().to(device)
         rel_adj=rel_adj.float().to(device)
@@ -182,20 +167,6 @@ class Expert_node(nn.Module):
 
 
     def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
-        '''
-        Forward takes:
-            sentence: sentence_id of size (batch_size, text_length)
-            aspect: aspect_id of size (batch_size, aspect_length)
-            pos_class: pos_tag_id of size (batch_size, text_length)
-            dep_tags: dep_tag_id of size (batch_size, text_length)
-            text_len: (batch_size,) length of each sentence
-            aspect_len: (batch_size, ) aspect length of each sentence
-            dep_rels: (batch_size, text_length) relation
-            dep_heads: (batch_size, text_length) which node adjacent to that node
-            aspect_position: (batch_size, text_length) mask, with the position of aspect as 1 and others as 0
-            dep_dirs: (batch_size, text_length) the directions each node to the aspect
-        '''
-
         fmask, rel_adj = inputs_to_deprel_adj(dep_heads, dep_rels, text_len, )
 
         device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -261,7 +232,6 @@ class Expert_node(nn.Module):
 
         #图分类
         feature_out = torch.cat([dep_out,  gat_out], dim = 1) # (N, D')  [16,800]
-        # feature_out = gat_out
         #############################################################################################
         x = self.dropout(feature_out)
         node_x = self.dropout(node_feature_final)
@@ -313,43 +283,6 @@ class Tower_node(nn.Module):
         node_logit = self.fc_final_node(node_feature_final)
         return node_logit
 
-class MMOE(nn.Module):
-    def __init__(self, args, num_experts, dep_tag_num, pos_tag_num, towers_graph_hidden, towers_node_hidden,tasks):
-        super(MMOE, self).__init__()
-        self.args = args
-        self.num_experts = num_experts
-        self.dep_tag_num = dep_tag_num
-        self.pos_tag_num = pos_tag_num  #
-        self.towers_graph_hidden = towers_graph_hidden
-        self.towers_node_hidden = towers_node_hidden
-        self.tasks = tasks
-
-        self.softmax = nn.Softmax(dim=1)
-
-        self.experts = nn.ModuleList([Expert(self.args, self.dep_tag_num, self.pos_tag_num) for i in range(self.num_experts)])
-        self.w_gates = nn.ParameterList([nn.Parameter(torch.randn(args.embedding_dim, num_experts), requires_grad=True) for i in range(self.tasks)])
-        self.towers_graph = Tower_graph(self.args)
-        self.towers_node = Tower_node(self.args)
-
-
-    def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
-        experts_o = [e(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs) for e in self.experts]
-        experts_o_tensor = torch.stack(experts_o)
-        gates_o=[]
-        gates_o = [self.softmax(g(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)) for g in self.w_gates]
-
-        tower_input_graph = [g.t().unsqueeze(2).expand(-1, -1, self.towers_graph_hidden) * experts_o_tensor for g in gates_o]
-        tower_input_graph = [torch.sum(ti, dim=0) for ti in tower_input_graph]
-
-        tower_input_node = [g.t().unsqueeze(2).expand(-1, -1, self.towers_node_hidden) * experts_o_tensor for g in gates_o]
-        tower_input_node = [torch.sum(ti, dim=0) for ti in tower_input_graph]
-
-        final_output_graph = [t(ti) for t, ti in zip(self.towers_graph, tower_input_graph)]
-        final_output_node = [t(ti) for t, ti in zip(self.towers_node, tower_input_node)]
-
-
-        return final_output_graph,final_output_node
-
 
 class GatingMechanism(nn.Module):
     def __init__(self, args, dep_tag_num, pos_tag_num):
@@ -374,11 +307,6 @@ class GatingMechanism(nn.Module):
 
 
     def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
-        '''
-        :param X:   LSTM 的输出tensor   |E| * H
-        :param Y:   Entity 的索引 id    |E|,
-        :return:    Gating后的结果      |E| * H
-        '''
         graph_X=self.expert_graph(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)
         node_Y,node_no_mean=self.expert_node(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)
         graph_X=graph_X.unsqueeze(1)

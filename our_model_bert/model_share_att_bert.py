@@ -130,11 +130,6 @@ class Expert_node(nn.Module):
         super(Expert_node, self).__init__()
         self.args = args
 
-        #Bert
-        # num_embeddings, embed_dim = args.glove_embedding.shape
-        # self.embed = nn.Embedding(num_embeddings, embed_dim)
-        # self.embed.weight = nn.Parameter(
-        #     args.glove_embedding, requires_grad=False)
 
         #Bert
         config = BertConfig.from_pretrained(args.bert_model_dir)
@@ -167,7 +162,6 @@ class Expert_node(nn.Module):
         self.dep_embed = nn.Embedding(dep_tag_num, args.dep_relation_embed_dim)
 
 
-    #def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
     def forward(self, input_ids, input_aspect_ids, word_indexer, aspect_indexer, input_cat_ids, segment_ids, pos_class,
                 dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
         fmask, rel_adj = inputs_to_deprel_adj(dep_heads, dep_rels, text_len, )
@@ -285,44 +279,6 @@ class Tower_node(nn.Module):
         node_logit = self.fc_final_node(node_feature_final)
         return node_logit
 
-class MMOE(nn.Module):
-    def __init__(self, args, num_experts, dep_tag_num, pos_tag_num, towers_graph_hidden, towers_node_hidden,tasks):
-        super(MMOE, self).__init__()
-        self.args = args
-        self.num_experts = num_experts
-        self.dep_tag_num = dep_tag_num
-        self.pos_tag_num = pos_tag_num  #
-        self.towers_graph_hidden = towers_graph_hidden
-        self.towers_node_hidden = towers_node_hidden
-        self.tasks = tasks
-
-        self.softmax = nn.Softmax(dim=1)
-
-        self.experts = nn.ModuleList([Expert(self.args, self.dep_tag_num, self.pos_tag_num) for i in range(self.num_experts)])
-        self.w_gates = nn.ParameterList([nn.Parameter(torch.randn(args.embedding_dim, num_experts), requires_grad=True) for i in range(self.tasks)])
-        self.towers_graph = Tower_graph(self.args)
-        self.towers_node = Tower_node(self.args)
-
-
-    def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
-        experts_o = [e(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs) for e in self.experts]
-        experts_o_tensor = torch.stack(experts_o)
-        gates_o=[]
-        gates_o = [self.softmax(g(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)) for g in self.w_gates]
-
-        tower_input_graph = [g.t().unsqueeze(2).expand(-1, -1, self.towers_graph_hidden) * experts_o_tensor for g in gates_o]
-        tower_input_graph = [torch.sum(ti, dim=0) for ti in tower_input_graph]
-
-        tower_input_node = [g.t().unsqueeze(2).expand(-1, -1, self.towers_node_hidden) * experts_o_tensor for g in gates_o]
-        tower_input_node = [torch.sum(ti, dim=0) for ti in tower_input_graph]
-
-        final_output_graph = [t(ti) for t, ti in zip(self.towers_graph, tower_input_graph)]
-        final_output_node = [t(ti) for t, ti in zip(self.towers_node, tower_input_node)]
-
-
-        return final_output_graph,final_output_node
-
-
 class GatingMechanism(nn.Module):
     def __init__(self, args, dep_tag_num, pos_tag_num):
         super(GatingMechanism, self).__init__()
@@ -346,41 +302,26 @@ class GatingMechanism(nn.Module):
         self.towers_graph = Tower_graph(self.args)
         self.towers_node = Tower_node(self.args)
 
-        # self.dropout = nn.Dropout(self.params.dropout)
 
-    #def forward(self, sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
     def forward(self, input_ids, input_aspect_ids, word_indexer, aspect_indexer, input_cat_ids, segment_ids, pos_class,
                 dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs):
-        '''
-        :param X:   LSTM 的输出tensor   |E| * H
-        :param Y:   Entity 的索引 id    |E|,
-        :return:    Gating后的结果      |E| * H
-        '''
-        # graph_X=self.expert_graph(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)
-        # node_Y,node_no_mean=self.expert_node(sentence, aspect, pos_class, dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)
+
         graph_X=self.expert_graph(input_ids, input_aspect_ids, word_indexer, aspect_indexer, input_cat_ids, segment_ids, pos_class,
                 dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)
         node_Y,node_no_mean=self.expert_node(input_ids, input_aspect_ids, word_indexer, aspect_indexer, input_cat_ids, segment_ids, pos_class,
                 dep_tags, text_len, aspect_len, dep_rels, dep_heads, aspect_position, dep_dirs)
         graph_X=graph_X.unsqueeze(1)
-        #gate_1 = torch.sigmoid(self.gate_theta_1[graph_X])
         gate_1=self.gate_theta_1
-        # node_Y_mean=node_Y.mean(dim=1)
-        # node_Y_mean=node_Y_mean.unsqueeze(1)
+
         node_Y_mean=node_Y.unsqueeze(1)
-        #print(node_Y_mean.shape)
         gate_2=self.gate_theta_2
-        #print(gate_2.shape)
-        #gate_2 = torch.sigmoid(self.gate_theta_2[node_Y_mean])
-        # print('graph_X_shape=',graph_X.shape)
-        # print('node_shape=',node_Y_mean.shape)
+
         
         output_graph = torch.mul(gate_1, graph_X) + torch.mul(gate_2, node_Y_mean)
         output_graph=output_graph.squeeze(1)
         logit=self.towers_graph(output_graph)
         node_logit=self.towers_node(node_no_mean)
-        #print(logit.shape)
-        #print(node_logit.shape)
+
 
         
         return logit,node_logit
